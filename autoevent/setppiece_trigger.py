@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from autoevent.helpers import team_of as _team_of_fn
 from tools import config
 
 
@@ -23,11 +24,19 @@ class SetPieceConfig:
 	penalty_gk_y_tol: float = config.PENALTY_GK_Y_TOL
 	penalty_other_players_tol: float = config.PENALTY_OTHER_PLAYERS_TOL
 	corner_tol: float = config.CORNER_TOL
+	throw_in_tol: float = config.THROW_IN_TOL
+	goal_area_x: float = config.GOAL_AREA_X
+	goal_area_x_tol: float = config.GOAL_AREA_X_TOL
+	goal_area_y_tol: float = config.GOAL_AREA_Y_TOL
 	goal_area_y: float = config.GOAL_AREA_Y
 
 	penalty_area_x_max: float = config.PENALTY_AREA_X_MAX
 	penalty_area_y_min: float = config.PENALTY_AREA_Y_MIN
 	penalty_area_y_max: float = config.PENALTY_AREA_Y_MAX
+
+	fallback_scan_step: int = config.FALLBACK_SCAN_STEP
+	sp_loss_map_window: float = config.SP_LOSS_MAP_WINDOW
+	throw_in_ball_z_min: float = config.THROW_IN_BALL_Z_MIN
 
 
 class SetPieceTrigger:
@@ -41,11 +50,11 @@ class SetPieceTrigger:
 		return dist <= self.cfg.r_pz
 
 # 킥오프 트리거
-	def _get_kickoff_trigger_player(self, row: pd.Series) -> str | None:
+	def _get_kickoff_trigger_player(self, row: pd.Series, first_in_row: pd.Series) -> str | None:
 		if not self._all_players_in_own_half(row):
 			return None
 
-		candidates: list[tuple[str, float]] = []
+		candidates: list[str] = []
 
 		for player in self.players:
 			player_x = row[self.x_col(player)]
@@ -62,18 +71,10 @@ class SetPieceTrigger:
 			if not near_center:
 				continue
 
-			center_score = (
-				(player_x - self.cfg.center_x) ** 2
-				+ (player_y - self.cfg.center_y) ** 2
-			)
-			candidates.append((player, center_score))
+			candidates.append(player)
 
-		if not candidates:
-			return None
-
-		candidates.sort(key=lambda item: item[1])
-		return candidates[0][0]
-
+		return self._select_nearest_by_first_in_dist(first_in_row, candidates)
+	
 	def _all_players_in_own_half(self, row: pd.Series) -> bool:
 		for player in self.players:
 			player_x = row[self.x_col(player)]
@@ -88,9 +89,10 @@ class SetPieceTrigger:
 
 		return True
 
+	
 # 페널티킥 트리거
-	def _get_penalty_trigger_player(self, row: pd.Series) -> str | None:
-		candidates: list[tuple[str, float]] = []
+	def _get_penalty_trigger_player(self, row: pd.Series, first_in_row: pd.Series) -> str | None:
+		candidates: list[str] = []
 
 		for player in self.players:
 			player_x = row[self.x_col(player)]
@@ -106,17 +108,9 @@ class SetPieceTrigger:
 			if not near_penalty_mark:
 				continue
 
-			penalty_score = (
-				(player_x - penalty_mark_x) ** 2
-				+ (player_y - self.cfg.center_y) ** 2
-			)
-			candidates.append((player, penalty_score))
+			candidates.append(player)
 
-		if not candidates:
-			return None
-
-		candidates.sort(key=lambda item: item[1])
-		return candidates[0][0]
+		return self._select_nearest_by_first_in_dist(first_in_row, candidates)
 
 	def _is_penalty_setup(self, row: pd.Series, executor: str) -> bool:
 		executor_team = self.team_of(executor)
@@ -189,9 +183,10 @@ class SetPieceTrigger:
 			return self.cfg.pitch_x - self.cfg.penalty_area_x_max, self.cfg.pitch_x
 		return 0.0, self.cfg.penalty_area_x_max
 
+
 # 코너킥 트리거
-	def _get_corner_trigger_player(self, row: pd.Series) -> str | None:
-		candidates: list[tuple[str, float]] = []
+	def _get_corner_trigger_player(self, row: pd.Series, first_in_row: pd.Series) -> str | None:
+		candidates: list[str] = []
 
 		for player in self.players:
 			player_x = row[self.x_col(player)]
@@ -206,20 +201,82 @@ class SetPieceTrigger:
 			if not (near_x and (near_top or near_bottom)):
 				continue
 
-			top_score = (player_x - corner_x) ** 2 + (player_y - self.cfg.pitch_y) ** 2
-			bottom_score = (player_x - corner_x) ** 2 + (player_y - 0.0) ** 2
-			candidates.append((player, min(top_score, bottom_score)))
+			candidates.append(player)
 
-		if not candidates:
+		return self._select_nearest_by_first_in_dist(first_in_row, candidates)
+
+
+# 스로인 트리거
+	def _get_throw_in_trigger_player(self, row: pd.Series, first_in_row: pd.Series) -> str | None:
+		candidates: list[str] = []
+
+		for player in self.players:
+			player_x = row[self.x_col(player)]
+			player_y = row[self.y_col(player)]
+			if pd.isna(player_x) or pd.isna(player_y):
+				continue
+
+			near_top = player_y > self.cfg.pitch_y - self.cfg.throw_in_tol
+			near_bottom = player_y < self.cfg.throw_in_tol
+			if not (near_top or near_bottom):
+				continue
+
+			candidates.append(player)
+
+		return self._select_nearest_by_first_in_dist(first_in_row, candidates)
+
+
+
+# 골킥 트리거
+	def _get_goal_kick_trigger_player(self, trigger_row: pd.Series, first_in_row: pd.Series) -> str | None:
+		candidates: list[str] = []
+
+		for player in self.players:
+			player_x = trigger_row[self.x_col(player)]
+			player_y = trigger_row[self.y_col(player)]
+			if pd.isna(player_x) or pd.isna(player_y):
+				continue
+
+			team = self.team_of(player)
+			goal_x = 0.0 if team == "home" else self.cfg.pitch_x
+			if goal_x == self.cfg.pitch_x:
+				goal_area_x_min = self.cfg.pitch_x - self.cfg.goal_area_x
+				goal_area_x_max = self.cfg.pitch_x
+			else:
+				goal_area_x_min = 0.0
+				goal_area_x_max = self.cfg.goal_area_x
+
+			in_x = goal_area_x_min - self.cfg.goal_area_x_tol <= player_x <= goal_area_x_max + self.cfg.goal_area_x_tol
+			in_y = abs(player_y - self.cfg.center_y) <= self.cfg.goal_area_y + self.cfg.goal_area_y_tol
+			if not (in_x and in_y):
+				continue
+
+			candidates.append(player)
+
+		return self._select_nearest_by_first_in_dist(first_in_row, candidates)
+
+	def _select_nearest_by_first_in_dist(self, first_in_row: pd.Series, candidates: list[str]) -> str | None:
+		scored_candidates: list[tuple[str, float]] = []
+		for player in candidates:
+			dist_col = f"dist_{player}"
+			if dist_col not in first_in_row.index:
+				continue
+
+			dist = first_in_row[dist_col]
+			if pd.isna(dist):
+				continue
+
+			scored_candidates.append((player, float(dist)))
+
+		if not scored_candidates:
 			return None
 
-		candidates.sort(key=lambda item: item[1])
-		return candidates[0][0]
-
+		scored_candidates.sort(key=lambda item: item[1])
+		return scored_candidates[0][0]
 
 	@staticmethod
 	def team_of(player_id: str) -> str:
-		return str(player_id).split("_")[0]
+		return _team_of_fn(player_id)
 
 	@staticmethod
 	def x_col(player_id: str) -> str:
