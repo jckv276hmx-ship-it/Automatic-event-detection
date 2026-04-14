@@ -1,14 +1,3 @@
-from dataclasses import dataclass
-from fnmatch import fnmatch
-
-import numpy as np
-import pandas as pd
-from scipy.signal import savgol_filter
-
-from tools.config import EPS_S, EPS_THETA, EPS_V, R_PZ, R_DZ, SG_WINDOW, SG_POLYORDER
-
-from fnmatch import fnmatch
-
 import numpy as np
 import pandas as pd
 from scipy.signal import savgol_filter
@@ -23,12 +12,7 @@ from tools.config import (
     SG_POLYORDER,
 )
 
-def get_players(trk: pd.DataFrame) -> list[str]:
-    x_cols = [
-        col for col in trk.columns
-        if fnmatch(col, "home_*_x") or fnmatch(col, "away_*_x")
-    ]
-    return sorted({col[:-2] for col in x_cols})
+from autoevent.helpers import get_players
 
 
 class PossessionDetector:
@@ -246,7 +230,12 @@ class PossessionDetector:
             next_row = self.tracking.iloc[next_control_idx]
 
             if next_row["ball_control"] == "possession" and next_row["controller_id"] == player:
-                continue
+                # i+1 ~ next_control_idx 사이에 dead ball이 있으면 공이 나갔다 돌아온 것 → loss
+                between = self.tracking.iloc[i + 1 : next_control_idx]
+                if not between.empty and (between["ball_state"] == "dead").any():
+                    pass  # loss로 기록
+                else:
+                    continue
 
             self.tracking.at[self.tracking.index[i], "is_loss"] = True
             self.tracking.at[self.tracking.index[i], "loss_player"] = player
